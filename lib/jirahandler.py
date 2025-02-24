@@ -2,7 +2,18 @@ from attackcti import attack_client
 import requests
 import sys, traceback, json, re
 import urllib3
+import urllib.parse
+import logging
 
+# Configure logging to output to both stdout and a file.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Logs to stdout
+        logging.FileHandler("attack2jira.log")  # Logs to a file
+    ]
+)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class JiraHandler:
@@ -197,6 +208,8 @@ class JiraHandler:
             else:
                 print("[!] Error getting custom fields")
                 sys.exit(1)
+
+            #logging.info(f"Custom fields: {custom_fields}")
 
             return resp
 
@@ -577,3 +590,63 @@ class JiraHandler:
             traceback.print_exc(file=sys.stdout)
             print ("[!] Error obtaining screen/tab ids!")
             sys.exit()
+
+    def issue_exists(self, ttp_id, project_key):
+        try:
+            print(f"Called issue_exists for {ttp_id}")  # Debug print
+            # Build a JQL query that looks for the technique id in the custom field "Id"
+            jql = f'project = {project_key} AND "Id[Short text]" ~ "{ttp_id}"'
+            #logging.info(f"Executing JQL: {jql}")
+            headers = {'Content-Type': 'application/json'}
+            # URL-encode the JQL string
+            jql_encoded = urllib.parse.quote(jql)
+            url = f"{self.url}/rest/api/3/search?jql={jql_encoded}"
+            r = requests.get(url, headers=headers, auth=(self.username, self.apitoken), verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                logging.info(f"Search result: {data.get('total', 0)} issues found for {ttp_id}")
+                return data.get('total', 0) > 0
+            else:
+                print(f"[!] Error searching for existing issues: {r.text}")
+                # Optionally, decide if you want to fail here or assume no issue exists
+                return False
+        except:
+            traceback.print_exc(file=sys.stdout)
+            print ("[!] Error checking for existing TTPs!")
+            sys.exit()
+
+    def get_issue_by_ttp(self, ttp_id, project_key):
+        """
+        Returns the parent issue for a given TTP ID.
+        If the fuzzy search returns several issues (e.g., T1234, T1234.001, T1234.002),
+        this method filters out sub-techniques (those with a dot in their Id field)
+        and returns the issue that exactly matches the parent's TTP ID.
+        """
+        # Build JQL with fuzzy operator since exact match isn't accepted.
+        jql = f'project = {project_key} AND "Id[Short text]" ~ "{ttp_id}"'
+        logging.info(f"Executing JQL to get issue: {jql}")
+        
+        headers = {'Content-Type': 'application/json'}
+        jql_encoded = urllib.parse.quote(jql)
+        url = f"{self.url}/rest/api/3/search?jql={jql_encoded}"
+        
+        r = requests.get(url, headers=headers, auth=(self.username, self.apitoken), verify=False)
+        if r.status_code == 200:
+            data = r.json()
+            issues = data.get('issues', [])
+            if issues:
+                custom_fields = self.get_custom_fields()
+                id_field = custom_fields.get('Id')
+                # Filter issues: only return the one that has no dot in the Id (i.e., the parent)
+                for issue in issues:
+                    issue_id_value = issue['fields'].get(id_field, "")
+                    # Only consider issues where the custom field exactly equals ttp_id and has no dot.
+                    if '.' not in issue_id_value and issue_id_value == ttp_id:
+                        logging.info(f"Found parent issue for {ttp_id}: {issue['key']}")
+                        return issue
+                logging.info(f"No parent issue found for {ttp_id} among returned issues.")
+        else:
+            logging.error(f"[!] Error searching for issue by TTP: {r.text}")
+        return None
+
+

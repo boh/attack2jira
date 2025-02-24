@@ -3,7 +3,17 @@ import json, sys, argparse, traceback
 from getpass import getpass
 from lib.jirahandler import JiraHandler
 from argparse import RawTextHelpFormatter
+import logging
 
+# Configure logging to output to both stdout and a file.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Logs to stdout
+        logging.FileHandler("attack2jira.log")  # Logs to a file
+    ]
+)
 
 class Attack2Jira:
 
@@ -89,88 +99,82 @@ class Attack2Jira:
         print ("[*] Done!")
 
     def create_attack_techniques_and_subtechniques(self, key):
-
-        # this creates each sub-technique as a SubTask 
-        # no issue links are created
-
         jiraclient = self.jirahandler
         techniques = self.get_attack_techniques()
         sorted_techniques = sorted(techniques, key=lambda k: k['external_references'][0]['external_id'])
-
-        print ("[*] Creating Jira issues for ATT&CK's techniques...")
-
+        print("[*] Creating Jira issues for ATT&CK's techniques...")
         for technique in sorted_techniques:
             try:
                 custom_fields = self.jirahandler.get_custom_fields()
-
                 name = technique['name']
-                id = technique['external_references'][0]['external_id']
+                ttp_id = technique['external_references'][0]['external_id']
                 url = technique['external_references'][0]['url']
                 tactic = technique['kill_chain_phases'][0]['phase_name']
                 description = technique['description']
+                datasources = technique.get('x_mitre_data_sources', [])
+                ds_payload = [{'value': ds.title()} for ds in datasources]
 
-                # some techniques dont have the field populated
-                if 'x_mitre_data_sources' in technique.keys():
-                    datasources = technique['x_mitre_data_sources']
+                if self.jirahandler.issue_exists(ttp_id, key):
+                    logging.info(f"Skipping technique {ttp_id} as it already exists.")
+                    continue
                 else:
-                    datasources = []
-
-                ds_payload = []
-                for ds in datasources: ds_payload.append({'value':ds.title()})
-
-                if not technique ['x_mitre_is_subtechnique']:
-                # Not a sub-technique
-                    issue_dict = {
-                        "fields": {
-                            "project": {"key": key },
-                            #"summary":  name + " (" + id + ")",
-                            "summary": name,
-                            "description": description,
-                            "issuetype": {"name": "Task"},
-                            custom_fields['Id']: id,
-                            custom_fields['Tactic']: {'value': tactic},
-                            custom_fields['Maturity']: {'value': 'Not Tracked'},
-                            custom_fields['Url']: url,
-                            custom_fields['Datasources']: ds_payload,
-                            # "customfield_11050": "Value that we're putting into a Free Text Field."
+                    # Branch between techniques and sub-techniques
+                    if not technique['x_mitre_is_subtechnique']:
+                        issue_dict = {
+                            "fields": {
+                                "project": {"key": key},
+                                "summary": name,
+                                "description": description,
+                                "issuetype": {"name": "Task"},
+                                custom_fields['Id']: ttp_id,
+                                custom_fields['Tactic']: {'value': tactic},
+                                custom_fields['Maturity']: {'value': 'Not Tracked'},
+                                custom_fields['Url']: url,
+                                custom_fields['Datasources']: ds_payload,
+                            }
                         }
-                    }
-                    #print("Creating Technique")
-                    parent_id= jiraclient.create_issue(issue_dict, id)
-                    #print (parent_id)
-                    #print("Created Technique with id : "+ str(parent_id))
-
-                else:
-                # Sub-technique
-                    issue_dict = {
-                        "fields": {
-                            "parent": {"id": parent_id['id']},
-                            "project": {"key": key},
-                            #"summary":  name + " (" + id + ")",
-                            "summary": name,
-                            "description": description,
-                            "issuetype": {"name": "Sub-task"},
-                            custom_fields['Id']: id,
-                            custom_fields['Tactic']: {'value': tactic},
-                            custom_fields['Maturity']: {'value': 'Not Tracked'},
-                            custom_fields['Url']: url,
-                            custom_fields['Datasources']: ds_payload,
-                            custom_fields['Sub-Technique of']: jiraclient.url +"/browse/"+parent_id['key'],
+                        parent_id = jiraclient.create_issue(issue_dict, ttp_id)
+                        # Optionally store parent_id mapping if needed for sub-techniques
+                    else:
+                        # For sub-techniques, you may also want to check existence or
+                        # associate with an already existing parent
+                        parent_ttp_id = ttp_id.split('.')[0]
+                        logging.info(f"Derived parent TTP id: {parent_ttp_id} for sub-technique {ttp_id}")
+                        parent_issue = self.jirahandler.get_issue_by_ttp(parent_ttp_id, key)
+                        if not parent_issue:
+                            logging.error(f"Parent issue for TTP {parent_ttp_id} not found. Skipping sub-technique {ttp_id}.")
+                            continue
+                        parent_issue_key = parent_issue['key']
+                        logging.info(f"Found parent issue: {parent_issue_key} for sub-technique {ttp_id}")
+                        issue_dict = {
+                            "fields": {
+                                #"parent": {"id": parent_id['id']},
+                                "parent": {"id": parent_issue['id']},
+                                "project": {"key": key},
+                                "summary": name,
+                                "description": description,
+                                "issuetype": {"name": "Sub-task"},
+                                custom_fields['Id']: ttp_id,
+                                custom_fields['Tactic']: {'value': tactic},
+                                custom_fields['Maturity']: {'value': 'Not Tracked'},
+                                custom_fields['Url']: url,
+                                custom_fields['Datasources']: ds_payload,
+                                #custom_fields['Sub-Technique of']: jiraclient.url + "/browse/" + parent_id['key'],
+                                custom_fields['Sub-Technique of']: jiraclient.url + "/browse/" + parent_issue_key,
+                            }
                         }
-                    }
-                    #print("Creating sub Technique under parent " + str(parent_id))
-                    ret_id= jiraclient.create_issue(issue_dict, id)
-                    #print("Created sub Technique with id : "+ str(ret_id))
-
+                        ret_id = jiraclient.create_issue(issue_dict, ttp_id)
+                        if ret_id:
+                            logging.info(f"Successfully created Jira issue for sub-technique {ttp_id}")
+                        else:
+                            logging.error(f"Failed to create Jira issue for sub-technique {ttp_id}")
             except Exception as ex:
-                print("\t[*] Could not create ticket for " + id)
+                logging.error(f"Error creating Jira issue for {ttp_id}: {str(ex)}", exc_info=True)
                 print(ex)
                 traceback.print_exc(file=sys.stdout)
                 pass
-                # print(ex)
-                # sys.exit()
-
         print("[*] Done!")
+
 
     def generate_json_layer(self, hideDisabled):
         VERSION = "2.2"
@@ -248,6 +252,7 @@ def main():
     parser.add_argument('-p', dest = 'project', type=str, help='Name of the Jira project to create.', default="Mitre Attack Framework")
     parser.add_argument('-k', dest = 'key', type=str, help='Project Key.(default=\'ATTACK\')', default="ATTACK")
     parser.add_argument('-hide', help='If set, \'Not Tracked\' techniques will be hidden',action='store_true')
+    parser.add_argument('-update', dest = 'update', action='store_true', help='Skip project creation and only update with new TTPs.')
     results = parser.parse_args()
 
     url= results.url
@@ -262,7 +267,12 @@ def main():
 
         if (action == "initialize"):
             attack2jira = Attack2Jira(url, user, pswd)
-            attack2jira.set_up_jira_automated(project, key)
+            if results.update:
+                # Skip project creation; update with new TTPs only
+                logging.info("Update mode enabled: Skipping project creation.")
+                attack2jira.create_attack_techniques_and_subtechniques(key)
+            else:
+                attack2jira.set_up_jira_automated(project, key)
 
         if (action == "export"):
             attack2jira = Attack2Jira(url, user, pswd)

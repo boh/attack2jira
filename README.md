@@ -1,5 +1,9 @@
 # attack2jira
 
+## UPDATE
+
+- added the `-update` option to get new TTPs
+
 The MITRE ATT&CK Framework is a great tool security teams can leverage to, among many other things, measure the security posture of an organization against tactics and techniques used in the wild by real threat actors.
 
 At the time of writing, ATT&CK covers 266 Techniques across 12 Tactics. If done manually, tracking this posture's state over time can become a tedious and challenging task. Blue/Purple teams require the proper tools that allow them to efficiently tackle this challenge and focus on whats important.
